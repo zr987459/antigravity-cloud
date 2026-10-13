@@ -1,0 +1,5 @@
+node_modules/
+*.log
+data/accounts/*.json
+data/keys.json
+data/user_stats.json
