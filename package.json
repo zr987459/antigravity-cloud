@@ -1,0 +1,23 @@
+{
+  "name": "antigravity-gateway",
+  "version": "2.2.0",
+  "description": "High-performance local/cloud reverse proxy for Antigravity & CloudCode endpoints",
+  "main": "src/server.mjs",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node tests/test-converter.mjs"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "gemini",
+    "claude",
+    "antigravity",
+    "proxy",
+    "anthropic"
+  ],
+  "author": "zr987459",
+  "license": "MIT"
+}
