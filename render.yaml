@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: antigravity-gateway
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: ADMIN_KEY
+        generateValue: true
