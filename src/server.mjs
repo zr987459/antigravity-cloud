@@ -328,8 +328,12 @@ const server = http.createServer(async (req, res) => {
     req.on('data', chunk => (body += chunk));
     req.on('end', async () => {
       const startTime = Date.now();
+      let statsRecorded = false; // 保证每个请求只记一次
+      let statsEmail = null;
+      let statsModel = null;
       try {
         const anthropicReq = JSON.parse(body);
+        statsModel = anthropicReq.model;
         if (!access.isAdmin(req)) {
           sendJson(res, 401, { type: 'error', error: { type: 'authentication_error', message: 'API Key 无效或缺失（x-api-key 填 ADMIN_KEY）' } });
           return;
@@ -347,6 +351,7 @@ const server = http.createServer(async (req, res) => {
           return;
         }
 
+        statsEmail = activeMgr.tokenData.email;
         let accessToken = await activeMgr.getValidAccessToken();
         const isStreaming = Boolean(anthropicReq.stream);
         let lastFailedDetails = null;
@@ -421,45 +426,62 @@ const server = http.createServer(async (req, res) => {
             model: anthropicReq.model,
             latency_ms: Date.now() - startTime,
             status: 502,
-            error: errDetail.slice(0, 100),
+            error: String(errDetail).slice(0, 100),
           });
+          statsRecorded = true;
           return;
         }
 
-        const totalLatency = Date.now() - startTime;
-
         if (isStreaming) {
+          // onFinish 恰好回调一次：正常结束 / 客户端断开(499) / 流中断(502)
           await handleStreamConversion(response, res, anthropicReq.model, (usage) => {
+            const status = usage.outcome === 'ok' ? 200 : usage.outcome === 'client_abort' ? 499 : 502;
             statsTracker.recordRequest({
               email: activeMgr.tokenData.email,
-            model: anthropicReq.model,
+              model: anthropicReq.model,
               latency_ms: Date.now() - startTime,
-              status: 200,
+              ttft_ms: usage.ttft_ms,
+              status,
               is_stream: true,
               input_tokens: usage.input_tokens,
               output_tokens: usage.output_tokens,
               cached_tokens: usage.cached_tokens,
+              thoughts_tokens: usage.thoughts_tokens,
+              error: usage.error || null,
             });
-          });
+          }, startTime);
         } else {
           const googleData = await response.json();
           const anthropicResp = convertGoogleToAnthropic(googleData, anthropicReq.model);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(anthropicResp));
 
+          const u = anthropicResp._gw_usage || {};
           statsTracker.recordRequest({
             email: activeMgr.tokenData.email,
             model: anthropicReq.model,
-            latency_ms: totalLatency,
+            latency_ms: Date.now() - startTime, // 含读取完整响应体的时间
             status: 200,
             is_stream: false,
-            input_tokens: anthropicResp.usage?.input_tokens || 0,
-            output_tokens: anthropicResp.usage?.output_tokens || 0,
-            cached_tokens: anthropicResp.usage?.cache_read_input_tokens || 0,
+            input_tokens: u.input_tokens || 0,
+            output_tokens: u.output_tokens || 0,
+            cached_tokens: u.cached_tokens || 0,
+            thoughts_tokens: u.thoughts_tokens || 0,
           });
         }
+        statsRecorded = true;
       } catch (err) {
         console.error('[Messages Handler Error]', err);
+        if (!statsRecorded && statsEmail) {
+          statsTracker.recordRequest({
+            email: statsEmail,
+            model: statsModel,
+            latency_ms: Date.now() - startTime,
+            status: 500,
+            error: String(err?.message || err).slice(0, 100),
+          });
+        }
+        if (res.headersSent) { try { res.end(); } catch (e) {} return; }
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           error: {
