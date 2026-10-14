@@ -1,5 +1,5 @@
 /**
- * 永久保存：把运行时新增的账号、绑定、授权码同步到 GitHub 仓库的 state 分支。
+ * 永久保存：把运行时新增/移除的账号同步到 GitHub 仓库的 state 分支。
  * Render 免费版重启/重新部署会清空磁盘，启动时从 state 分支恢复。
  * state 分支不会触发 Render 部署（Render 只部署 main）。
  *
@@ -72,7 +72,7 @@ export class Persist {
 
   /** 启动时调用：在账号池加载前把 state 分支的数据写回本地 */
   async restore() {
-    if (!this.enabled) { console.log('[Persist] 未设置 GH_TOKEN，账号与绑定不会永久保存'); return; }
+    if (!this.enabled) { console.log('[Persist] 未设置 GH_TOKEN，账号不会永久保存'); return; }
     try {
       await this.ensureBranch();
       const accDir = path.join(this.dataDir, 'accounts');
@@ -81,38 +81,11 @@ export class Persist {
       const removedText = await this.getFile(`${DIR}/removed.json`);
       const removed = removedText ? JSON.parse(removedText) : [];
       for (const name of removed) { try { fs.unlinkSync(path.join(accDir, name)); } catch (e) {} }
-      // 账号（含绑定）
+      // 账号
       let n = 0;
       for (const f of await this.listDir(`${DIR}/accounts`)) {
         const text = await this.getFile(f.path);
         if (text) { fs.writeFileSync(path.join(accDir, f.name), text, 'utf-8'); n++; }
-      }
-      // 授权码列表与吊销记录
-      const keysText = await this.getFile(`${DIR}/keys.json`);
-      if (keysText) {
-        const remote = JSON.parse(keysText);
-        const file = path.join(this.dataDir, 'keys.json');
-        let local = {};
-        try { local = JSON.parse(fs.readFileSync(file, 'utf-8')); } catch (e) {}
-        const keys = Array.isArray(local.keys) ? local.keys : [];
-        for (const k of remote.keys || []) if (k && k.key && !keys.find(x => x.key === k.key)) keys.push(k);
-        local.keys = keys;
-        local.revoked = Array.from(new Set([...(local.revoked || []), ...(remote.revoked || [])]));
-        fs.writeFileSync(file, JSON.stringify(local, null, 2), 'utf-8');
-      }
-      // App 用户登记（按授权码合并，保留最新）
-      const usersText = await this.getFile(`${DIR}/app-users.json`);
-      if (usersText) {
-        const file = path.join(this.dataDir, 'app-users.json');
-        const map = new Map();
-        let local = [];
-        try { local = JSON.parse(fs.readFileSync(file, 'utf-8')); } catch (e) {}
-        for (const u of [...JSON.parse(usersText), ...local]) {
-          if (!u || !u.invite_id) continue;
-          const prev = map.get(u.invite_id);
-          if (!prev || (u.last_seen || 0) >= (prev.last_seen || 0)) map.set(u.invite_id, { ...prev, ...u });
-        }
-        fs.writeFileSync(file, JSON.stringify([...map.values()], null, 2), 'utf-8');
       }
       this.removed = new Set(removed);
       this.lastSync = Date.now();
@@ -164,15 +137,6 @@ export class Persist {
       this.removed = removed;
       this.knownFiles = local;
       await this.put(`${DIR}/removed.json`, JSON.stringify(Array.from(removed), null, 2), 'state: removed accounts');
-      let keys = {};
-      try { keys = JSON.parse(fs.readFileSync(path.join(this.dataDir, 'keys.json'), 'utf-8')); } catch (e) {}
-      await this.put(`${DIR}/keys.json`, JSON.stringify({ keys: keys.keys || [], revoked: keys.revoked || [] }, null, 2), 'state: access codes');
-      try {
-        const users = fs.readFileSync(path.join(this.dataDir, 'app-users.json'), 'utf-8');
-        // last_seen 每次心跳都变，只在名单本身变化时提交，避免刷屏
-        const stable = JSON.stringify(JSON.parse(users).map(({ last_seen, ...u }) => u));
-        if (this.usersStable !== stable) { await this.put(`${DIR}/app-users.json`, users, 'state: app users'); this.usersStable = stable; }
-      } catch (e) {}
       this.lastSync = Date.now(); this.lastError = '';
     } catch (e) {
       this.lastError = e.message;
