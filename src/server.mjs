@@ -23,7 +23,6 @@ import { statsTracker } from './stats.mjs';
 import { ANTIGRAVITY_ENDPOINTS, ANTIGRAVITY_ENDPOINT_DAILY } from './constants.mjs';
 import { AccessControl } from './access-control.mjs';
 import { Persist } from './persist.mjs';
-import { licenseMode, isLicensed, hasLicense, issueLease, verifyLease, DEVICE_ID, verifyLicense, loadSigner, canIssue, issueLicense, issueInvite, verifyInvite, AppRegistry, HOME_URL } from './license.mjs';
 import {
   buildAntigravityHeaders,
   buildCloudCodePayload,
@@ -34,64 +33,30 @@ import { handleStreamConversion } from './sse-streamer.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 8790;
-// 永久保存：启动时先从 GitHub state 分支恢复账号/绑定/授权码
+// 永久保存：启动时先从 GitHub state 分支恢复账号
 const persist = new Persist(path.join(__dirname, '..', 'data'));
 await persist.restore();
 const accountPool = new AccountPool(path.join(__dirname, '..', 'data', 'accounts'));
 persist.snapshot();
-for (const m of ['addAccount', 'removeAccount', 'clearAccounts', 'bind', 'unbind']) {
+for (const m of ['addAccount', 'removeAccount', 'clearAccounts']) {
   const orig = accountPool[m].bind(accountPool);
   accountPool[m] = (...args) => { const r = orig(...args); persist.schedule(); return r; };
 }
 const oauthFlowManager = new OAuthFlowManager(accountPool);
-const access = new AccessControl(path.join(__dirname, '..', 'data', 'keys.json'));
-loadSigner(path.join(__dirname, '..', 'data', 'keys.json'));
-const appRegistry = new AppRegistry(path.join(__dirname, '..', 'data', 'app-users.json'));
-{ const o = appRegistry.save.bind(appRegistry); appRegistry.save = () => { o(); persist.schedule(); }; }
-const APP_VERSION_FILE = path.join(__dirname, '..', 'public', 'app-version.json');
-const APP_INTEGRITY_FILE = path.join(__dirname, '..', 'public', 'app-integrity.json');
-
-// App 模式：定时向总后台报到 + 续租（同步账号到管理员后台；被吊销的账号立刻失效）
-const ATTEST = { cert: String(process.env.AG_ATT_CERT || ''), hash: String(process.env.AG_ATT_HASH || '') };
-async function appHeartbeat() {
-  if (!licenseMode()) return;
-  const mgrs = Array.from(accountPool.managers.values()).filter(hasLicense);
-  if (!mgrs.length) return;
-  const accounts = mgrs.map(tm => ({ email: tm.tokenData.email, license: tm.tokenData.license, invite_id: tm.tokenData.inviteId || '', note: tm.tokenData.inviteNote || '' }));
-  const body = JSON.stringify({ accounts, version: process.env.APP_VERSION || '', device: DEVICE_ID, att: ATTEST });
-  try {
-    await fetch(HOME_URL + '/api/app/ping', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
-    const r = await fetch(HOME_URL + '/api/app/lease', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
-    const d = await r.json().catch(() => null);
-    if (!d || !d.ok) return;
-    for (const tm of mgrs) {
-      const e = tm.tokenData.email;
-      if ((d.revoked || []).includes(e)) {
-        delete tm.tokenData.license; delete tm.tokenData.lease; tm.save();
-        console.log('[License] 账号已被管理员吊销:', e);
-        continue;
-      }
-      const lease = d.leases && d.leases[e];
-      if (lease && verifyLease(e, lease) && lease !== tm.tokenData.lease) { tm.tokenData.lease = lease; tm.save(); }
-    }
-  } catch (e) {}
-}
-if (licenseMode()) { setTimeout(appHeartbeat, 1500); setInterval(appHeartbeat, 10 * 60 * 1000); }
-access.findBound = id => accountPool.findBound(id);
-{ const origSave = access.save.bind(access); access.save = () => { origSave(); persist.schedule(); }; }
+const access = new AccessControl();
 
 function sendJson(res, status, obj) {
   res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(obj));
 }
 function denyAdmin(res) {
-  sendJson(res, 401, { ok: false, need_admin: true, error: '需要管理密钥' });
+  sendJson(res, 401, { ok: false, need_admin: true, error: '需要管理密钥（ADMIN_KEY）' });
 }
 // 仅管理员可访问的接口
 const ADMIN_PATHS = new Set([
   '/api/status', '/api/stats', '/api/logs', '/api/logs/clear', '/api/gemini/test', '/api/gemini/auth',
   '/api/oauth/exchange', '/api/oauth/token-exchange', '/api/accounts/add-token', '/api/accounts/switch',
-  '/api/accounts/remove', '/api/keys', '/api/keys/create', '/api/keys/revoke', '/api/accounts/bind', '/api/accounts/unbind', '/api/accounts/license', '/api/license/issue', '/api/license/invite', '/api/app/users', '/api/app/users/revoke', '/api/accounts/restore',
+  '/api/accounts/remove', '/api/gemini/quota',
 ]);
 function readBody(req) {
   return new Promise(resolve => { let b = ''; req.on('data', c => (b += c)); req.on('end', () => { try { resolve(JSON.parse(b || '{}')); } catch (e) { resolve({}); } }); });
@@ -165,205 +130,16 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 1.65 App 公共接口（总后台）：版本、激活、心跳
-  if (url.pathname === '/api/app/version') {
-    let v = {};
-    try { v = JSON.parse(fs.readFileSync(APP_VERSION_FILE, 'utf-8')); } catch (e) {}
-    sendJson(res, 200, { ok: true, ...v, url: '/app.apk' });
-    return;
-  }
-  if (url.pathname === '/api/app/activate' && req.method === 'POST') {
-    const { invite, email } = await readBody(req);
-    const e = String(email || '').trim().toLowerCase();
-    let p = verifyInvite(invite);
-    const ak = String(invite || '').trim();
-    if (!p && ak.startsWith('ak-')) {
-      const q = access.verify(ak);
-      if (q && !(access.revoked && access.revoked.has(ak))) p = { i: 'ak:' + AccessControl.codeId(ak), n: q.n || '' };
-    }
-    if (!canIssue()) { sendJson(res, 400, { ok: false, error: '总后台未开启签发' }); return; }
-    if (!p || !e) { sendJson(res, 400, { ok: false, error: '授权码不对' }); return; }
-    const owner = appRegistry.ownerOf(p.i);
-    if (owner && owner !== e) { sendJson(res, 409, { ok: false, error: '这个授权码已经被别的账号用了' }); return; }
-    if (!owner && p.x && Date.now() > p.x) { sendJson(res, 400, { ok: false, error: '授权码已过期，请找管理员重新生成' }); return; }
-    if (appRegistry.isRevoked(e, p.i)) { sendJson(res, 403, { ok: false, error: '这个授权已被管理员吊销' }); return; }
-    appRegistry.bind(p.i, e, p.n || '');
-    sendJson(res, 200, { ok: true, license: issueLicense(e), invite_id: p.i, note: p.n || '' });
-    return;
-  }
-  if (url.pathname === '/api/app/restore' && req.method === 'POST') {
-    const { email } = await readBody(req);
-    const e = String(email || '').trim().toLowerCase();
-    const hit = e && appRegistry.list().find(u => u.email === e);
-    if (!hit || hit.revoked || appRegistry.isRevoked(e) || !canIssue()) { sendJson(res, 404, { ok: false }); return; }
-    sendJson(res, 200, { ok: true, license: issueLicense(e), invite_id: hit.invite_id, note: hit.note || '' });
-    return;
-  }
-  if (url.pathname === '/api/app/lease' && req.method === 'POST') {
-    const { accounts, version, device, att } = await readBody(req);
-    if (!canIssue()) { sendJson(res, 400, { ok: false, error: '总后台未开启签发' }); return; }
-    // 安装包核验：证书必须是官方签名，代码哈希必须和该版本的官方构建一致
-    let official = {};
-    try { official = JSON.parse(fs.readFileSync(APP_INTEGRITY_FILE, 'utf-8')); } catch (e) {}
-    const a = att || {};
-    const v = String(version || '');
-    if ((official.cert && a.cert !== official.cert) || (official.hashes && official.hashes[v] && ![].concat(official.hashes[v]).includes(a.hash))) {
-      console.warn('[License] 非官方安装包请求续租，已拒绝:', v, String(a.cert || '').slice(0, 12), String(a.hash || '').slice(0, 12));
-      sendJson(res, 403, { ok: false, tamper: true, error: '安装包不是官方版本' }); return;
-    }
-    const dev = String(device || '').slice(0, 64);
-    const leases = {}, revoked = [];
-    for (const x of Array.isArray(accounts) ? accounts.slice(0, 20) : []) {
-      const e = String(x.email || '').trim().toLowerCase();
-      if (!verifyLicense(e, x.license)) continue;
-      if (appRegistry.isRevoked(e, x.invite_id)) { revoked.push(e); continue; }
-      leases[e] = issueLease(e, dev);
-    }
-    sendJson(res, 200, { ok: true, leases, revoked });
-    return;
-  }
-  if (url.pathname === '/api/app/ping' && req.method === 'POST') {
-    const body = await readBody(req);
-    const { accounts, version } = body;
-    for (const a of Array.isArray(accounts) ? accounts.slice(0, 20) : []) {
-      const e = String(a.email || '').trim().toLowerCase();
-      if (!verifyLicense(e, a.license)) continue;
-      const id = String(a.invite_id || 'email:' + e).slice(0, 40);
-      const owner = appRegistry.ownerOf(id);
-      if (owner && owner !== e) continue;
-      appRegistry.bind(id, e, a.note ? String(a.note).slice(0, 40) : undefined, { version: String(version || '').slice(0, 20), device: String(body.device || '').slice(0, 12) });
-    }
-    sendJson(res, 200, { ok: true });
-    return;
-  }
-
   // 1.7 管理接口鉴权
   if (ADMIN_PATHS.has(url.pathname) && !access.isAdmin(req)) {
     denyAdmin(res);
     return;
   }
 
-  // 1.8 授权码管理
-  if (url.pathname === '/api/keys') {
-    const keys = access.list().map(k => ({ ...k, bound: k.email || accountPool.findBound(AccessControl.codeId(k.key)) || '' }));
-    sendJson(res, 200, { ok: true, enabled: access.enabled, has_admin: Boolean(access.adminKey), keys });
-    return;
-  }
-  if (url.pathname === '/api/keys/create' && req.method === 'POST') {
-    const { name } = await readBody(req);
-    const entry = access.create(name);
-    sendJson(res, 200, { ok: true, key: entry });
-    return;
-  }
-  if (url.pathname === '/api/keys/revoke' && req.method === 'POST') {
-    const { key } = await readBody(req);
-    sendJson(res, 200, { ok: access.revoke(key) });
-    return;
-  }
-
-  if (url.pathname === '/api/license/invite' && req.method === 'POST') {
-    const { note } = await readBody(req);
-    try { sendJson(res, 200, { ok: true, code: issueInvite(note) }); }
-    catch (e) { sendJson(res, 400, { ok: false, error: e.message }); }
-    return;
-  }
-  if (url.pathname === '/api/app/users') {
-    sendJson(res, 200, { ok: true, users: appRegistry.list() });
-    return;
-  }
-  if (url.pathname === '/api/app/users/revoke' && req.method === 'POST') {
-    const { invite_id, revoked } = await readBody(req);
-    sendJson(res, 200, { ok: appRegistry.setRevoked(String(invite_id || ''), revoked !== false) });
-    return;
-  }
-
-  // App 授权码：管理员签发（只有带私钥的服务器能签）
-  if (url.pathname === '/api/license/issue' && req.method === 'POST') {
-    const { email } = await readBody(req);
-    try { sendJson(res, 200, { ok: true, email: String(email || '').trim().toLowerCase(), code: issueLicense(email) }); }
-    catch (e) { sendJson(res, 400, { ok: false, error: e.message }); }
-    return;
-  }
-
-  // App 授权码：给本机账号激活
-  if (url.pathname === '/api/accounts/restore' && req.method === 'POST') {
-    const { email } = await readBody(req);
-    const tm = Array.from(accountPool.managers.values()).find(t => t.tokenData.email === email);
-    if (!tm) { sendJson(res, 404, { ok: false }); return; }
-    if (isLicensed(tm)) { sendJson(res, 200, { ok: true }); return; }
-    if (hasLicense(tm)) { await appHeartbeat(); sendJson(res, 200, { ok: isLicensed(tm), restored: isLicensed(tm) }); return; }
-    try {
-      const r = await fetch(HOME_URL + '/api/app/restore', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email }) });
-      const d = await r.json().catch(() => ({}));
-      if (d.ok && verifyLicense(tm.tokenData.email, d.license)) {
-        tm.tokenData.license = d.license; tm.tokenData.inviteId = d.invite_id || ''; tm.tokenData.inviteNote = d.note || ''; tm.save();
-        await appHeartbeat();
-        sendJson(res, 200, { ok: true, restored: true }); return;
-      }
-    } catch (e) {}
-    sendJson(res, 200, { ok: false });
-    return;
-  }
-  if (url.pathname === '/api/accounts/license' && req.method === 'POST') {
-    const { email, code } = await readBody(req);
-    const tm = accountPool.getManager(String(email || ''));
-    if (!tm) { sendJson(res, 400, { ok: false, error: '账号不存在' }); return; }
-    const c = String(code || '').trim();
-    if (c.startsWith('AGI-') || c.startsWith('ak-')) {
-      try {
-        const r = await fetch(HOME_URL + '/api/app/activate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ invite: c, email: tm.tokenData.email }) });
-        const d = await r.json().catch(() => ({}));
-        if (!d.ok || !verifyLicense(tm.tokenData.email, d.license)) { sendJson(res, 400, { ok: false, error: d.error || '激活失败' }); return; }
-        tm.tokenData.license = d.license; tm.tokenData.inviteId = d.invite_id || ''; tm.tokenData.inviteNote = d.note || ''; tm.save();
-        await appHeartbeat();
-        sendJson(res, 200, { ok: true });
-      } catch (e) { sendJson(res, 502, { ok: false, error: '连不上总后台，检查网络后再试（总后台休眠时第一次可能要等半分钟）' }); }
-      return;
-    }
-    if (!verifyLicense(tm.tokenData.email, c)) { sendJson(res, 400, { ok: false, error: '授权码不对，或不是给这个账号的' }); return; }
-    tm.tokenData.license = c; tm.save();
-    await appHeartbeat();
-    sendJson(res, 200, { ok: true });
-    return;
-  }
-
-  if (url.pathname === '/api/accounts/bind' && req.method === 'POST') {
-    const { email, key } = await readBody(req);
-    const k = String(key || '').trim();
-    const p = access.verify(k);
-    if (!p || p.e) { sendJson(res, 400, { ok: false, error: '授权码不对' }); return; }
-    if (!accountPool.getManager(email)) { sendJson(res, 400, { ok: false, error: '账号不存在' }); return; }
-    if (!access.keys.find(x => x.key === k)) { access.keys.push({ key: k, email: '', name: p.n || '', created: new Date(p.t || Date.now()).toISOString(), source: 'file' }); access.save(); }
-    accountPool.bind(email, AccessControl.codeId(k), p.n || '');
-    sendJson(res, 200, { ok: true });
-    return;
-  }
-  if (url.pathname === '/api/accounts/unbind' && req.method === 'POST') {
-    const { email } = await readBody(req);
-    sendJson(res, 200, { ok: accountPool.unbind(email) });
-    return;
-  }
-
-  // 1.9 调用方自查：授权码对应的账号
-  if (url.pathname === '/api/me') {
-    const who = access.resolve(req);
-    if (!who) { sendJson(res, 401, { ok: false, error: '授权码无效' }); return; }
-    if (who.role === 'unbound') { sendJson(res, 403, { ok: false, error: '授权码还没绑定账号' }); return; }
-    sendJson(res, 200, { ok: true, role: who.role, email: who.email || null, name: who.name || null });
-    return;
-  }
-
   // 2. 真实配额接口 (/api/gemini/quota)
   if (url.pathname === '/api/gemini/quota') {
-    const who = access.resolve(req);
-    if (!who || who.role === 'unbound') { sendJson(res, 401, { ok: false, error: '需要授权码或管理密钥' }); return; }
-    let mgr;
-    if (who.role === 'user') mgr = accountPool.getManager(who.email);
-    else {
-      const email = url.searchParams.get('email');
-      mgr = email ? accountPool.getManager(email) : accountPool.getActiveManager();
-      mgr = mgr || accountPool.getActiveManager();
-    }
+    const email = url.searchParams.get('email');
+    const mgr = (email && accountPool.getManager(email)) || accountPool.getActiveManager();
     const quotaData = await fetchRealQuota(mgr);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(quotaData));
@@ -413,8 +189,6 @@ const server = http.createServer(async (req, res) => {
       stats: statsTracker.getStats(),
       signature_cache_size: signatureCache.size(),
       persist: persist.status(),
-      license_mode: licenseMode() ? 'app' : '',
-      can_issue: canIssue(),
     };
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(status, null, 2));
@@ -572,29 +346,11 @@ const server = http.createServer(async (req, res) => {
       const startTime = Date.now();
       try {
         const anthropicReq = JSON.parse(body);
-        const who = access.resolve(req);
-        if (!who) {
-          sendJson(res, 401, { type: 'error', error: { type: 'authentication_error', message: '授权码无效或缺失（x-api-key）' } });
+        if (!access.isAdmin(req)) {
+          sendJson(res, 401, { type: 'error', error: { type: 'authentication_error', message: 'API Key 无效或缺失（x-api-key 填 ADMIN_KEY）' } });
           return;
         }
-        if (who.role === 'unbound') {
-          sendJson(res, 403, { type: 'error', error: { type: 'permission_error', message: '授权码还没绑定账号，请联系管理员' } });
-          return;
-        }
-        // 授权码绑定的账号专用，不会串用其他账号
-        let activeMgr = who.role === 'user' ? accountPool.getManager(who.email) : accountPool.getActiveManager();
-        if (who.role === 'user' && !activeMgr) {
-          sendJson(res, 403, { type: 'error', error: { type: 'permission_error', message: '该授权码绑定的账号已不在账号池，请联系管理员' } });
-          return;
-        }
-
-        if (activeMgr && who.role !== 'user' && !isLicensed(activeMgr)) {
-          activeMgr = Array.from(accountPool.managers.values()).find(isLicensed) || null;
-          if (!activeMgr) {
-            sendJson(res, 403, { type: 'error', error: { type: 'permission_error', message: '账号还没授权：在 App 里给账号填入授权码后才能使用' } });
-            return;
-          }
-        }
+        const activeMgr = accountPool.getActiveManager();
 
         if (!activeMgr) {
           res.writeHead(401, { 'Content-Type': 'application/json' });
@@ -677,6 +433,7 @@ const server = http.createServer(async (req, res) => {
             },
           }));
           statsTracker.recordRequest({
+            email: activeMgr.tokenData.email,
             model: anthropicReq.model,
             latency_ms: Date.now() - startTime,
             status: 502,
@@ -690,7 +447,8 @@ const server = http.createServer(async (req, res) => {
         if (isStreaming) {
           await handleStreamConversion(response, res, anthropicReq.model, (usage) => {
             statsTracker.recordRequest({
-              model: anthropicReq.model,
+              email: activeMgr.tokenData.email,
+            model: anthropicReq.model,
               latency_ms: Date.now() - startTime,
               status: 200,
               is_stream: true,
@@ -706,6 +464,7 @@ const server = http.createServer(async (req, res) => {
           res.end(JSON.stringify(anthropicResp));
 
           statsTracker.recordRequest({
+            email: activeMgr.tokenData.email,
             model: anthropicReq.model,
             latency_ms: totalLatency,
             status: 200,
