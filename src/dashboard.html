@@ -92,6 +92,11 @@
   .stat .label { margin-bottom: 6px; }
   .stat .num { font-family: var(--mono); font-size: 30px; font-weight: 600; letter-spacing: -1px; color: #fff; text-shadow: 0 0 14px rgba(0,229,255,.25); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.15; }
   .stat .sub { margin-top: 6px; font-size: 12.5px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .stat .num.pct { color: var(--signal); }
+  .stat .bd { margin-top: 8px; display: grid; gap: 2px; font-family: var(--mono); font-size: 12px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+  .stat .bd > div { display: flex; justify-content: space-between; gap: 10px; white-space: nowrap; }
+  .stat .bd b { color: var(--ink-2); font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+  .stat .bd .hit b { color: var(--signal); }
   .label { font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .8px; text-transform: uppercase; color: var(--ink-3); }
   .muted { color: var(--ink-3); }
 
@@ -188,6 +193,14 @@
   .st-bad { color: var(--bad); font-family: var(--mono); font-weight: 700; }
   .err-cell { color: var(--ink-3); font-size: 12.5px; min-width: 220px; max-width: 460px; word-break: break-word; }
   .log-tbl td.mono { white-space: nowrap; }
+  .log-tbl td.num, .use-tbl td.num { font-family: var(--mono); font-size: 12.5px; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .tok-sub { display: block; margin-top: 2px; font-size: 11px; color: var(--ink-3); white-space: nowrap; }
+  .tok-sub i { font-style: normal; color: var(--ink-2); }
+  .hit-hi { color: var(--ok); } .hit-mid { color: var(--signal); } .hit-lo { color: var(--ink-3); }
+  .c-mtok { display: none; }
+  .m-tok { display: flex; flex-wrap: wrap; gap: 2px 12px; font-family: var(--mono); font-size: 12px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+  .m-tok b { color: var(--ink-2); font-weight: 600; }
+  .legacy-note { padding: 10px 18px; font-size: 12px; color: var(--ink-3); border-top: 1px solid var(--rule); }
 
   /* ===== Modal ===== */
   .overlay { position: fixed; inset: 0; z-index: 70; display: none; align-items: center; justify-content: center; padding: 32px; background: rgba(0,0,0,.62); backdrop-filter: blur(3px); }
@@ -274,13 +287,22 @@
     #acc-list tr.empty-row { display: table-row; }
     #acc-list tr.empty-row td { display: table-cell; }
 
-    /* logs: time / model / status / latency */
-    #v-logs .log-tbl th:nth-child(3), #v-logs .log-tbl td:nth-child(3),
-    #v-logs .log-tbl th:nth-child(5), #v-logs .log-tbl td:nth-child(5),
-    #v-logs .log-tbl th:nth-child(6), #v-logs .log-tbl td:nth-child(6),
-    #v-logs .log-tbl th:nth-child(7), #v-logs .log-tbl td:nth-child(7),
-    #v-logs .log-tbl th:nth-child(9), #v-logs .log-tbl td:nth-child(9),
-    #v-logs .log-tbl th:nth-child(10), #v-logs .log-tbl td:nth-child(10) { display: none; }
+    /* logs & per-account usage: compact grid rows, token breakdown always visible */
+    #v-logs thead, #ov-use-card thead { display: none; }
+    #log-list tr, #use-list tr { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 3px 10px; padding: 10px 14px; border-bottom: 1px solid var(--rule); }
+    #log-list tr:last-child, #use-list tr:last-child { border-bottom: 0; }
+    #log-list td, #use-list td { display: none; padding: 0; border: 0; background: none !important; }
+    #log-list td.c-time, #log-list td.c-model, #log-list td.c-status, #log-list td.c-lat { display: block; }
+    #log-list td.c-model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #log-list td.c-lat .tok-sub { display: none; }
+    #log-list td.c-mtok, #use-list td.c-mtok { display: block; grid-column: 1 / -1; }
+    #log-list td.c-err:not(:empty) { display: block; grid-column: 1 / -1; min-width: 0; max-width: none; font-size: 12px; }
+    #use-list td.c-acc { display: block; grid-column: 1 / 3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #use-list td.c-req { display: block; grid-column: 3 / -1; text-align: right; }
+    #log-list tr.empty-row, #use-list tr.empty-row { display: table-row; }
+    #log-list tr.empty-row td, #use-list tr.empty-row td { display: table-cell; }
+    .stat .bd { font-size: 11px; margin-top: 6px; }
+    .stat .bd > div { gap: 6px; }
     .tbl th, .tbl td { padding-left: 12px; padding-right: 12px; }
     #model-list td:nth-child(2), #model-list td:nth-child(3), #model-list td:nth-child(4),
     #v-models th:nth-child(2), #v-models th:nth-child(3), #v-models th:nth-child(4) { display: none; }
@@ -368,10 +390,14 @@
       <!-- ===== 概览 ===== -->
       <section class="view on" id="v-overview">
         <div class="grid g-4">
-          <div class="card stat"><div class="label">请求数</div><div class="num" id="st-req">—</div><div class="sub" id="st-req-sub">累计</div></div>
-          <div class="card stat"><div class="label">Tokens</div><div class="num" id="st-tok">—</div><div class="sub" id="st-tok-sub">输入 — · 输出 —</div></div>
-          <div class="card stat"><div class="label">缓存命中</div><div class="num" id="st-cache">—</div><div class="sub">cached tokens</div></div>
-          <div class="card stat"><div class="label">账号</div><div class="num" id="st-acc">—</div><div class="sub" id="st-acc-sub">主控 —</div></div>
+          <div class="card stat"><div class="label">请求数</div><div class="num fit" id="st-req">—</div>
+            <div class="bd"><div><span>成功</span><b id="st-req-ok">—</b></div><div><span>失败</span><b id="st-req-err">—</b></div><div><span>均延迟/首字</span><b id="st-lat">—</b></div></div></div>
+          <div class="card stat"><div class="label">Tokens 合计</div><div class="num fit" id="st-tok">—</div>
+            <div class="bd"><div><span>输入</span><b id="st-tok-in">—</b></div><div><span>缓存</span><b id="st-tok-cache">—</b></div><div><span>输出</span><b id="st-tok-out">—</b></div><div><span>其中思考</span><b id="st-tok-think">—</b></div></div></div>
+          <div class="card stat"><div class="label">缓存命中率</div><div class="num fit pct" id="st-cache">—</div>
+            <div class="bd"><div><span>命中</span><b id="st-cache-tok">—</b></div><div><span>提示</span><b id="st-prompt-tok">—</b></div><div class="hit"><span>近24h</span><b id="st-cache-24h">—</b></div></div></div>
+          <div class="card stat"><div class="label">账号</div><div class="num" id="st-acc">—</div><div class="sub" id="st-acc-sub">主控 —</div>
+            <div class="bd"><div><span>近24h 请求</span><b id="st-24h-req">—</b></div><div><span>近24h Tokens</span><b id="st-24h-tok">—</b></div></div></div>
         </div>
 
         <div class="grid g-main mt">
@@ -414,10 +440,21 @@
           <div class="card-head"><div class="card-title"><span class="no">03</span>最近请求</div><button class="btn btn-sm" onclick="go('logs')">全部日志 →</button></div>
           <div class="card-body flush tbl-wrap">
             <table class="tbl log-tbl">
-              <thead><tr><th>时间</th><th>模型</th><th>账号</th><th class="r">状态</th><th class="r">Tokens</th><th class="r">延迟</th></tr></thead>
-              <tbody id="ov-logs"><tr class="empty-row"><td colspan="6">还没有请求</td></tr></tbody>
+              <thead><tr><th>时间</th><th>模型</th><th>账号</th><th class="r">状态</th><th class="r">Tokens（输入 / 缓存 / 输出）</th><th class="r">命中率</th><th class="r">延迟</th></tr></thead>
+              <tbody id="ov-logs"><tr class="empty-row"><td colspan="7">还没有请求</td></tr></tbody>
             </table>
           </div>
+        </div>
+
+        <div class="card mt" id="ov-use-card">
+          <div class="card-head"><div class="card-title"><span class="no">04</span>按账号用量</div><span class="pill" id="use-count">0 个</span></div>
+          <div class="card-body flush tbl-wrap">
+            <table class="tbl use-tbl">
+              <thead><tr><th>账号</th><th class="r">请求</th><th class="r">输入</th><th class="r">缓存</th><th class="r">输出</th><th class="r">合计</th><th class="r">命中率</th><th class="r">均延迟</th></tr></thead>
+              <tbody id="use-list"><tr class="empty-row"><td colspan="8">还没有请求</td></tr></tbody>
+            </table>
+          </div>
+          <div class="legacy-note" id="legacy-note" style="display:none">注：升级前记录的输出 token 不含思考 token，历史数据无法回溯修正。</div>
         </div>
       </section>
 
@@ -446,8 +483,8 @@
           </div>
           <div class="card-body flush tbl-wrap">
             <table class="tbl log-tbl">
-              <thead><tr><th>时间</th><th>模型</th><th>账号</th><th class="r">状态</th><th class="r">输入</th><th class="r">输出</th><th class="r">缓存</th><th class="r">延迟</th><th class="c">流式</th><th>错误</th></tr></thead>
-              <tbody id="log-list"><tr class="empty-row"><td colspan="10">还没有请求</td></tr></tbody>
+              <thead><tr><th>时间</th><th>模型</th><th>账号</th><th class="r">状态</th><th class="r">输入</th><th class="r">缓存</th><th class="r">输出</th><th class="r">合计</th><th class="r">命中率</th><th class="r">延迟</th><th class="c">流式</th><th>错误</th></tr></thead>
+              <tbody id="log-list"><tr class="empty-row"><td colspan="12">还没有请求</td></tr></tbody>
             </table>
           </div>
         </div>
@@ -599,6 +636,28 @@ const fmtNum = n => {
   if (n >= 1e4) return (n / 1e3).toFixed(1) + 'K';
   return n.toLocaleString();
 };
+// 精确数值：千分位分组，不缩写
+const fmtInt = n => (n === null || n === undefined || isNaN(n)) ? '—' : Math.round(Number(n)).toLocaleString('en-US');
+// 命中率：分母为 0 时返回 —
+const fmtPct = r => (r === null || r === undefined || isNaN(r)) ? '—' : (r * 100).toFixed(1) + '%';
+const hitRate = (input, cached) => { const d = (input || 0) + (cached || 0); return d > 0 ? (cached || 0) / d : null; };
+const hitCls = r => r === null || r === undefined ? 'hit-lo' : r >= 0.5 ? 'hit-hi' : r >= 0.1 ? 'hit-mid' : 'hit-lo';
+const fmtSec = ms => (ms === null || ms === undefined || isNaN(ms) || ms <= 0) ? '—' : (ms / 1000).toFixed(2) + 's';
+const fmtTime = l => {
+  if (!l.timestamp) return esc(l.time || '');
+  const d = new Date(l.timestamp), now = new Date(), p = v => String(v).padStart(2, '0');
+  const t = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  return d.toDateString() === now.toDateString() ? t : `${p(d.getMonth() + 1)}-${p(d.getDate())} ${t}`;
+};
+// 大数字自动缩小字号，保证完整显示不被省略号截断
+function fitNums() {
+  document.querySelectorAll('.stat .num.fit').forEach(el => {
+    el.style.fontSize = '';
+    let size = parseFloat(getComputedStyle(el).fontSize);
+    while (el.scrollWidth > el.clientWidth + 1 && size > 12) { size -= 1; el.style.fontSize = size + 'px'; }
+  });
+}
+window.addEventListener('resize', () => { clearTimeout(window._fitT); window._fitT = setTimeout(fitNums, 120); });
 let toastTimer;
 function showToast(msg, isErr = false) {
   const t = $('toast'); t.textContent = msg; t.className = 'show' + (isErr ? ' err' : '');
@@ -740,10 +799,7 @@ async function loadStatus() {
     allAccounts = accounts;
     activeEmail = data.active_account?.email || '';
     const s = data.stats || {};
-    $('st-req').textContent = fmtNum(s.total_requests);
-    $('st-tok').textContent = fmtNum(s.total_tokens);
-    $('st-tok-sub').textContent = `输入 ${fmtNum(s.input_tokens)} · 输出 ${fmtNum(s.output_tokens)}`;
-    $('st-cache').textContent = fmtNum(s.cached_tokens);
+    renderStats(s);
     $('st-acc').textContent = String(accounts.length).padStart(2, '0');
     $('st-acc-sub').textContent = '主控 ' + (activeEmail || '未设置');
     $('acc-count').textContent = accounts.length + ' 个';
@@ -761,6 +817,45 @@ async function loadStatus() {
     setServer('err', 'Offline');
     return false;
   }
+}
+
+function renderStats(s) {
+  const inT = s.input_tokens || 0, caT = s.cached_tokens || 0, outT = s.output_tokens || 0;
+  const total = inT + caT + outT; // total = 输入(未缓存) + 缓存 + 输出
+  $('st-req').textContent = fmtInt(s.total_requests);
+  $('st-req-ok').textContent = fmtInt(s.success_requests ?? s.total_requests);
+  $('st-req-err').textContent = fmtInt(s.error_requests ?? 0);
+  $('st-lat').textContent = fmtSec(s.avg_latency_ms) + ' / ' + fmtSec(s.avg_ttft_ms);
+  $('st-tok').textContent = fmtInt(total);
+  $('st-tok-in').textContent = fmtInt(inT);
+  $('st-tok-cache').textContent = fmtInt(caT);
+  $('st-tok-out').textContent = fmtInt(outT);
+  $('st-tok-think').textContent = fmtInt(s.thoughts_tokens || 0);
+  $('st-cache').textContent = fmtPct(s.cache_hit_rate !== undefined ? s.cache_hit_rate : hitRate(inT, caT));
+  $('st-cache-tok').textContent = fmtInt(caT);
+  $('st-prompt-tok').textContent = fmtInt(inT + caT);
+  const d = s.last_24h || {};
+  $('st-cache-24h').textContent = fmtPct(d.cache_hit_rate !== undefined ? d.cache_hit_rate : hitRate(d.input, d.cached));
+  $('st-24h-req').textContent = fmtInt(d.requests ?? 0);
+  $('st-24h-tok').textContent = fmtInt(d.tokens ?? 0);
+  const accs = s.accounts || [];
+  $('use-count').textContent = accs.length + ' 个';
+  $('legacy-note').style.display = s.legacy_data ? '' : 'none';
+  $('use-list').innerHTML = accs.length ? accs.map(a => {
+    const r = a.cache_hit_rate !== undefined ? a.cache_hit_rate : hitRate(a.input_tokens, a.cached_tokens);
+    return `<tr>
+      <td class="mono c-acc">${esc(a.email === 'anonymous' ? '—' : a.email)}</td>
+      <td class="num c-req">${fmtInt(a.total_requests)}${a.error_requests ? ` <span class="st-bad">(${fmtInt(a.error_requests)} 失败)</span>` : ''}</td>
+      <td class="num">${fmtInt(a.input_tokens)}</td>
+      <td class="num muted">${fmtInt(a.cached_tokens)}</td>
+      <td class="num">${fmtInt(a.output_tokens)}</td>
+      <td class="num">${fmtInt(a.total_tokens)}</td>
+      <td class="num ${hitCls(r)}">${fmtPct(r)}</td>
+      <td class="num">${fmtSec(a.avg_latency_ms)}</td>
+      <td class="c-mtok"><div class="m-tok"><span>入 <b>${fmtInt(a.input_tokens)}</b></span><span>缓 <b>${fmtInt(a.cached_tokens)}</b></span><span>出 <b>${fmtInt(a.output_tokens)}</b></span><span>命中 <b class="${hitCls(r)}">${fmtPct(r)}</b></span><span>均延迟 <b>${fmtSec(a.avg_latency_ms)}</b></span></div></td>
+    </tr>`;
+  }).join('') : '<tr class="empty-row"><td colspan="8">还没有请求</td></tr>';
+  requestAnimationFrame(fitNums);
 }
 
 function renderAccounts() {
@@ -914,28 +1009,38 @@ async function loadLogs() {
     const st = l => { const ok = l.status >= 200 && l.status < 300; return `<span class="${ok ? 'st-ok' : 'st-bad'}">${esc(l.status)}</span>`; };
     const lat = l => l.latency_ms ? (l.latency_ms / 1000).toFixed(2) + 's' : '—';
     const who = l => esc(l.email && l.email !== 'anonymous' ? l.email : '—');
+    const tk = l => {
+      const t = l.tokens || {}; const i = t.input || 0, c = t.cached || 0, o = t.output || 0;
+      const r = l.cache_hit_rate !== undefined ? l.cache_hit_rate : hitRate(i, c);
+      return { i, c, o, th: t.thoughts || 0, tot: t.total ?? (i + c + o), r };
+    };
+    const latCell = l => `${lat(l)}${l.ttft_ms ? `<span class="tok-sub">首字 ${fmtSec(l.ttft_ms)}</span>` : ''}`;
     $('log-count').textContent = logs.length + ' 条';
-    $('log-list').innerHTML = logs.length ? logs.map(l => `<tr>
-      <td class="mono nowrap muted">${esc(l.time || '')}</td>
-      <td class="mono">${esc(l.model || '—')}</td>
+    $('log-list').innerHTML = logs.length ? logs.map(l => { const t = tk(l); return `<tr>
+      <td class="mono nowrap muted c-time">${fmtTime(l)}</td>
+      <td class="mono c-model">${esc(l.model || '—')}</td>
       <td class="mono muted">${who(l)}</td>
-      <td class="r">${st(l)}</td>
-      <td class="r mono">${fmtNum(l.tokens?.input || 0)}</td>
-      <td class="r mono">${fmtNum(l.tokens?.output || 0)}</td>
-      <td class="r mono muted">${fmtNum(l.tokens?.cached || 0)}</td>
-      <td class="r mono">${lat(l)}</td>
+      <td class="r c-status">${st(l)}</td>
+      <td class="num">${fmtInt(t.i)}</td>
+      <td class="num muted">${fmtInt(t.c)}</td>
+      <td class="num">${fmtInt(t.o)}${t.th ? `<span class="tok-sub">思考 ${fmtInt(t.th)}</span>` : ''}</td>
+      <td class="num">${fmtInt(t.tot)}</td>
+      <td class="num ${hitCls(t.r)}">${fmtPct(t.r)}</td>
+      <td class="r mono c-lat">${latCell(l)}</td>
       <td class="c">${l.is_stream ? '✓' : '<span class="muted">—</span>'}</td>
-      <td class="err-cell">${esc(l.error ? String(l.error).slice(0, 160) : '')}</td>
-    </tr>`).join('') : '<tr class="empty-row"><td colspan="10">还没有请求</td></tr>';
+      <td class="err-cell c-err">${esc(l.error ? String(l.error).slice(0, 160) : '')}</td>
+      <td class="c-mtok"><div class="m-tok"><span>入 <b>${fmtInt(t.i)}</b></span><span>缓 <b>${fmtInt(t.c)}</b></span><span>出 <b>${fmtInt(t.o)}</b></span><span>命中 <b class="${hitCls(t.r)}">${fmtPct(t.r)}</b></span>${l.ttft_ms ? `<span>首字 <b>${fmtSec(l.ttft_ms)}</b></span>` : ''}</div></td>
+    </tr>`; }).join('') : '<tr class="empty-row"><td colspan="12">还没有请求</td></tr>';
     const recent = logs.slice(0, 8);
-    $('ov-logs').innerHTML = recent.length ? recent.map(l => `<tr>
-      <td class="mono nowrap muted">${esc(l.time || '')}</td>
+    $('ov-logs').innerHTML = recent.length ? recent.map(l => { const t = tk(l); return `<tr>
+      <td class="mono nowrap muted">${fmtTime(l)}</td>
       <td class="mono">${esc(l.model || '—')}</td>
       <td class="mono muted">${who(l)}</td>
       <td class="r">${st(l)}</td>
-      <td class="r mono">${fmtNum((l.tokens?.input || 0) + (l.tokens?.output || 0))}</td>
-      <td class="r mono">${lat(l)}</td>
-    </tr>`).join('') : '<tr class="empty-row"><td colspan="6">还没有请求</td></tr>';
+      <td class="num">${fmtInt(t.tot)}<span class="tok-sub"><i>${fmtInt(t.i)}</i> / <i>${fmtInt(t.c)}</i> / <i>${fmtInt(t.o)}</i></span></td>
+      <td class="num ${hitCls(t.r)}">${fmtPct(t.r)}</td>
+      <td class="r mono">${latCell(l)}</td>
+    </tr>`; }).join('') : '<tr class="empty-row"><td colspan="7">还没有请求</td></tr>';
   } catch (e) {}
 }
 async function clearLogs() {
