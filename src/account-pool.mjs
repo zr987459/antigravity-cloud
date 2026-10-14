@@ -5,7 +5,6 @@
 import fs from 'fs';
 import path from 'path';
 import { TokenManager } from './token-manager.mjs';
-import { isLicensed, hasLicense } from './license.mjs';
 
 export class AccountPool {
   constructor(accountsDir) {
@@ -38,11 +37,6 @@ export class AccountPool {
     const tm = new TokenManager(filePath);
     tm.setRefreshToken(refreshToken, email);
     if (projectId) tm.tokenData.projectId = projectId;
-    const prev = this.managers.get(email);
-    if (prev && prev.tokenData.license && !tm.tokenData.license) { tm.tokenData.license = prev.tokenData.license; tm.save(); }
-    if (prev && prev.tokenData.boundCode && !tm.tokenData.boundCode) {
-      tm.tokenData.boundCode = prev.tokenData.boundCode; tm.tokenData.boundName = prev.tokenData.boundName || ''; tm.save();
-    }
     this.managers.set(email, tm);
     if (!this.activeEmail || !this.managers.has(this.activeEmail)) this.activeEmail = email; // 不抢占当前主控账号
     return tm;
@@ -96,26 +90,6 @@ export class AccountPool {
     return first;
   }
 
-  /** 按授权码 ID 找绑定的账号 */
-  findBound(codeId) {
-    if (!codeId) return null;
-    for (const [email, tm] of this.managers.entries()) if (tm.tokenData.boundCode === codeId) return email.toLowerCase();
-    return null;
-  }
-
-  bind(email, codeId, name = '') {
-    const tm = this.getManager(email); if (!tm) return false;
-    for (const other of this.managers.values()) if (other !== tm && other.tokenData.boundCode === codeId) { other.tokenData.boundCode = ''; other.tokenData.boundName = ''; other.save(); }
-    tm.tokenData.boundCode = codeId; tm.tokenData.boundName = name || ''; tm.save();
-    return true;
-  }
-
-  unbind(email) {
-    const tm = this.getManager(email); if (!tm) return false;
-    tm.tokenData.boundCode = ''; tm.tokenData.boundName = ''; tm.save();
-    return true;
-  }
-
   getManager(email) {
     if (!email) return this.getActiveManager();
     const clean = email.trim().toLowerCase();
@@ -126,8 +100,7 @@ export class AccountPool {
 
   rotateToNext() {
     if (this.managers.size <= 1) return null;
-    const emails = Array.from(this.managers.keys()).filter(e => e === this.activeEmail || isLicensed(this.managers.get(e)));
-    if (emails.length <= 1) return null;
+    const emails = Array.from(this.managers.keys());
     const currentIndex = emails.indexOf(this.activeEmail);
     const nextIndex = (currentIndex + 1) % emails.length;
     this.activeEmail = emails[nextIndex];
@@ -141,10 +114,6 @@ export class AccountPool {
       list.push({
         email,
         isActive: email === this.activeEmail,
-        boundCode: tm.tokenData.boundCode || '',
-        boundName: tm.tokenData.boundName || '',
-        licensed: isLicensed(tm),
-        has_license: hasLicense(tm),
         ...tm.getStatus(),
       });
     }
