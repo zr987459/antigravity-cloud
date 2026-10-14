@@ -8,6 +8,7 @@ import crypto from 'crypto';
 import { signatureCache, FALLBACK_THOUGHT_SIGNATURE } from './signature-cache.mjs';
 import { scrubIdentity } from './scrub.mjs';
 import { sanitizeSchema } from './schema-sanitizer.mjs';
+import { normalizeGeminiUsage, toAnthropicUsage } from './usage.mjs';
 
 /**
  * 转换 Anthropic Request 为 Google Cloud Code / Gemini Request
@@ -203,12 +204,9 @@ export function convertGoogleToAnthropic(googleData, originalModel) {
     anthropicContent.push({ type: 'text', text: '' });
   }
 
-  const usageMeta = responseObj?.usageMetadata || {};
-  const promptTokens = usageMeta.promptTokenCount || 0;
-  const candidatesTokens = usageMeta.candidatesTokenCount || 0;
-  const cachedTokens = usageMeta.cachedContentTokenCount || 0;
+  const usage = normalizeGeminiUsage(responseObj?.usageMetadata);
 
-  return {
+  const message = {
     id: `msg_${crypto.randomBytes(12).toString('hex')}`,
     type: 'message',
     role: 'assistant',
@@ -216,11 +214,10 @@ export function convertGoogleToAnthropic(googleData, originalModel) {
     content: anthropicContent,
     stop_reason: stopReason,
     stop_sequence: null,
-    usage: {
-      input_tokens: Math.max(0, promptTokens - cachedTokens),
-      output_tokens: candidatesTokens,
-      cache_read_input_tokens: cachedTokens,
-      cache_creation_input_tokens: 0,
-    },
+    usage: toAnthropicUsage(usage),
   };
+  // 网关内部记账用（含思考 token 明细）；不可枚举，JSON.stringify 不会输出给客户端
+  Object.defineProperty(message, '_gw_usage', { value: usage, enumerable: false });
+  return message;
+
 }
