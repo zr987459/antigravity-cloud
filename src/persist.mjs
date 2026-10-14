@@ -4,8 +4,8 @@
  * state 分支不会触发 Render 部署（Render 只部署 main）。
  *
  * 需要 Render 环境变量：
- *   GH_TOKEN  GitHub 令牌（对本仓库有 Contents 读写权限）
- *   GH_REPO   可选，默认 zr987459/antigravity-gateway
+ *   GH_TOKEN  GitHub 令牌（对 GH_REPO 有 Contents 读写权限）
+ *   GH_REPO   保存账号的私有仓库，如 yourname/antigravity-state（需有 main 分支）
  *   GH_STATE_BRANCH 可选，默认 state
  */
 import fs from 'fs';
@@ -19,7 +19,7 @@ export class Persist {
   constructor(dataDir) {
     this.dataDir = dataDir;
     this.token = (process.env.GH_TOKEN || '').trim();
-    this.repo = (process.env.GH_REPO || 'zr987459/antigravity-gateway').trim();
+    this.repo = (process.env.GH_REPO || '').trim();
     this.branch = (process.env.GH_STATE_BRANCH || 'state').trim();
     this.shas = new Map();   // remote path -> sha
     this.pushed = new Map(); // remote path -> content hash
@@ -30,7 +30,7 @@ export class Persist {
     this.lastSync = 0;
   }
 
-  get enabled() { return Boolean(this.token); }
+  get enabled() { return Boolean(this.token && this.repo); }
 
   status() { return { enabled: this.enabled, branch: this.branch, last_sync: this.lastSync || null, error: this.lastError || null }; }
 
@@ -72,7 +72,7 @@ export class Persist {
 
   /** 启动时调用：在账号池加载前把 state 分支的数据写回本地 */
   async restore() {
-    if (!this.enabled) { console.log('[Persist] 未设置 GH_TOKEN，账号不会永久保存'); return; }
+    if (!this.enabled) { console.log('[Persist] 未设置 GH_TOKEN / GH_REPO，账号不会永久保存'); return; }
     try {
       await this.ensureBranch();
       const accDir = path.join(this.dataDir, 'accounts');
