@@ -4,11 +4,16 @@
 
 import crypto from 'crypto';
 import { signatureCache, FALLBACK_THOUGHT_SIGNATURE } from './signature-cache.mjs';
+import { normalizeGeminiUsage, mergeRawUsage, toAnthropicUsage } from './usage.mjs';
 
 /**
  * 将 Google 的流式输出逐块解析并转换为 Anthropic 标准 Server-Sent Events 事件
+ *
+ * onFinish(usage) 保证【恰好调用一次】：正常结束、上游中断、客户端断开都会回调。
+ * usage = { input_tokens, cached_tokens, output_tokens, thoughts_tokens, total_tokens,
+ *           ttft_ms, outcome: 'ok' | 'client_abort' | 'stream_error', error }
  */
-export async function handleStreamConversion(upstreamRes, clientRes, originalModel, onFinish = null) {
+export async function handleStreamConversion(upstreamRes, clientRes, originalModel, onFinish = null, startTime = Date.now()) {
   clientRes.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
   clientRes.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   clientRes.setHeader('Connection', 'keep-alive');
@@ -20,15 +25,45 @@ export async function handleStreamConversion(upstreamRes, clientRes, originalMod
   let hasEmittedStart = false;
   let stopReason = 'end_turn';
 
-  let inputTokens = 0;
-  let outputTokens = 0;
-  let cacheReadTokens = 0;
+  let rawUsage = null;         // 合并后的原始 usageMetadata（累计值取最大）
+  let firstTokenAt = 0;        // 首个内容 token 到达时间（TTFT）
+  let finished = false;
+  let clientGone = false;
+  const usageNow = () => normalizeGeminiUsage(rawUsage);
+  const finish = (outcome, error = null) => {
+    if (finished) return;
+    finished = true;
+    if (typeof onFinish === 'function') {
+      try {
+        onFinish({ ...usageNow(), ttft_ms: firstTokenAt ? firstTokenAt - startTime : null, outcome, error });
+      } catch (e) { console.error('[Stream onFinish Error]', e); }
+    }
+  };
 
   let latestSeenSignature = FALLBACK_THOUGHT_SIGNATURE;
   let thinkingHasSignature = false;
 
   const sendEvent = (event, data) => {
+    if (clientGone) return;
     clientRes.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
+  const emitStart = () => {
+    if (hasEmittedStart) return;
+    hasEmittedStart = true;
+    sendEvent('message_start', {
+      type: 'message_start',
+      message: {
+        id: messageId,
+        type: 'message',
+        role: 'assistant',
+        content: [],
+        model: originalModel,
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { ...toAnthropicUsage(usageNow()), output_tokens: 1 },
+      },
+    });
   };
 
   const closeCurrentBlock = () => {
@@ -59,6 +94,14 @@ export async function handleStreamConversion(upstreamRes, clientRes, originalMod
   const decoder = new TextDecoder();
   let buffer = '';
 
+  // 客户端提前断开：停止读取上游，按已收到的 usage 记一次
+  const onClientClose = () => {
+    if (clientRes.writableFinished) return;
+    clientGone = true;
+    reader.cancel().catch(() => {});
+  };
+  clientRes.on?.('close', onClientClose);
+
   try {
     while (true) {
       const { done, value } = await reader.read();
@@ -87,35 +130,16 @@ export async function handleStreamConversion(upstreamRes, clientRes, originalMod
 
         const inner = chunk.response || chunk;
         if (inner.usageMetadata) {
-          inputTokens = inner.usageMetadata.promptTokenCount || inputTokens;
-          outputTokens = inner.usageMetadata.candidatesTokenCount || outputTokens;
-          cacheReadTokens = inner.usageMetadata.cachedContentTokenCount || cacheReadTokens;
+          rawUsage = mergeRawUsage(rawUsage, inner.usageMetadata);
         }
 
         const candidate = inner?.candidates?.[0];
         const parts = candidate?.content?.parts || [];
 
         // 1. 发送 message_start 事件
-        if (!hasEmittedStart && parts.length > 0) {
-          hasEmittedStart = true;
-          sendEvent('message_start', {
-            type: 'message_start',
-            message: {
-              id: messageId,
-              type: 'message',
-              role: 'assistant',
-              content: [],
-              model: originalModel,
-              stop_reason: null,
-              stop_sequence: null,
-              usage: {
-                input_tokens: Math.max(0, inputTokens - cacheReadTokens),
-                output_tokens: 1,
-                cache_read_input_tokens: cacheReadTokens,
-                cache_creation_input_tokens: 0,
-              },
-            },
-          });
+        if (parts.length > 0) {
+          if (!firstTokenAt) firstTokenAt = Date.now();
+          emitStart();
         }
 
         // 2. 遍历各 part 分段处理
@@ -194,37 +218,43 @@ export async function handleStreamConversion(upstreamRes, clientRes, originalMod
       }
     }
 
+    if (clientGone) {
+      finish('client_abort', '客户端提前断开');
+      return;
+    }
+
+    emitStart(); // 上游没有任何 part 时也保证事件序列完整
     closeCurrentBlock();
 
-    // 3. 终结事件
+    // 3. 终结事件（message_delta.usage 为累计值，带上最终的 input/cache 数）
+    const finalUsage = toAnthropicUsage(usageNow());
     sendEvent('message_delta', {
       type: 'message_delta',
       delta: {
         stop_reason: stopReason,
         stop_sequence: null,
       },
-      usage: {
-        output_tokens: outputTokens || 1,
-      },
+      usage: finalUsage,
     });
 
     sendEvent('message_stop', {
       type: 'message_stop',
     });
 
-    if (typeof onFinish === 'function') {
-      onFinish({
-        input_tokens: Math.max(0, inputTokens - cacheReadTokens),
-        output_tokens: outputTokens || 1,
-        cached_tokens: cacheReadTokens,
-      });
-    }
-
+    finish('ok');
     clientRes.end();
   } catch (err) {
-    console.error('[Stream Processing Error]', err);
+    if (clientGone) {
+      finish('client_abort', '客户端提前断开');
+    } else {
+      console.error('[Stream Processing Error]', err);
+      finish('stream_error', String(err?.message || err).slice(0, 100));
+    }
     try {
       clientRes.end();
     } catch (e) {}
+  } finally {
+    clientRes.off?.('close', onClientClose);
+    finish('ok'); // 兜底（已调用过则无操作）
   }
 }
