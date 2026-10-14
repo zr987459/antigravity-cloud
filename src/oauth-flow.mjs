@@ -166,7 +166,7 @@ export class OAuthFlowManager {
     if (/^1\/\/[0-9A-Za-z_-]{20,}$/.test(code)) return await this.validateAndAddRefreshToken(code);
     code = code.split('&')[0].split('#')[0];
     if (!/^4\/[0-9A-Za-z_-]{20,}$/.test(code)) {
-      throw new Error('授权码不完整或已失效：如果刚才的页面显示「授权成功」，账号已经加好，直接返回控制台即可；否则请重新点「登录 Google」，授权完成后把地址栏里从 http://localhost 开头、包含 code= 的整条网址完整复制过来（不要只复制一部分）');
+      throw new Error('Google 回调 code 不完整或已失效：如果刚才的页面显示「授权成功」，账号已经加好，直接返回控制台即可；否则请重新点「登录 Google」，授权完成后把地址栏里从 http://localhost 开头、包含 code= 的整条网址完整复制过来（不要只复制一部分）');
     }
     return await this.exchangeCode(code, redirectUri);
   }
