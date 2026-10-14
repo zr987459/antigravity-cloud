@@ -108,22 +108,6 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 1.55 App 下载（APK 由 CI 提交到 public/Antigravity.apk）
-  if (url.pathname === '/app.apk' || url.pathname === '/app') {
-    const k = url.searchParams.get('k') || '';
-    const apk = path.join(__dirname, '..', 'public', 'Antigravity.apk');
-    if (!fs.existsSync(apk)) { sendJson(res, 404, { error: 'APK 还没生成' }); return; }
-    const st = fs.statSync(apk);
-    res.writeHead(200, {
-      'Content-Type': 'application/vnd.android.package-archive',
-      'Content-Length': st.size,
-      'Content-Disposition': 'attachment; filename="Antigravity.apk"',
-      'Cache-Control': 'no-cache',
-    });
-    fs.createReadStream(apk).pipe(res);
-    return;
-  }
-
   // 1.6 公开健康检查（不暴露账号）
   if (url.pathname === '/health') {
     sendJson(res, 200, { ok: true, app: 'antigravity-gateway', version: '3.1.0', auth: access.enabled });
